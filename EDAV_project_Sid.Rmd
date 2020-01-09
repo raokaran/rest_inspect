@@ -1,0 +1,172 @@
+---
+title: "EDAV_project"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(zipcode)
+library(maptools)
+library(ggmap)
+library(rjson)
+library(jsonlite)
+```
+
+
+```{r}
+violations <- read.csv("NYC_inspection.csv")
+
+actions <- as.factor(violations$ACTION)
+summary(violations$ACTION)
+
+vio_sub <- violations[violations$ACTION != 'No violations were recorded at the time of this inspection.',]
+vio_sub <- vio_sub[violations$ACTION != 'Establishment re-opened by DOHMH',]
+vio_sub <- vio_sub[vio_sub$ACTION != '',]
+
+
+rest_vios <- vio_sub %>% group_by(DBA) %>%
+  summarize(Freq = n(),num_stores = n_distinct(CAMIS)) %>%
+  ungroup()
+
+
+rest_vios <- na.omit(rest_vios)
+rest_vios_ord <- rest_vios[order(- rest_vios$Freq),]
+top_20 <- rest_vios_ord[1:20,]
+top_20$DBA <- factor(top_20$DBA, levels = top_20$DBA[order(top_20$Freq)])
+
+ggplot(top_20,aes(x = top_20$DBA, y = top_20$Freq)) + 
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Name") + ylab("Number of Violations") + labs(title = "Top 20 restaurants/franchises with the most violations")
+```
+
+
+- Upon an inspection of the franchises with the most violations, we see that most of the big franchise chains have the most violations. This is due to them having a large number of stores across the city, thus allowing for higher chance for a violation to occur.
+
+```{r}
+rest_vios_df <- as.data.frame(rest_vios)
+rest_vios_df <- na.omit(rest_vios_df)
+rest_vios_df$vio_per_store <- rest_vios_df$Freq / rest_vios_df$num_stores
+
+
+
+rest_vios_ord_df <- rest_vios_df[order(- rest_vios_df$vio_per_store),]
+top_20_new <- rest_vios_ord_df[1:20,]
+top_20_new$DBA <- factor(top_20_new$DBA, levels = top_20_new$DBA[order(top_20_new$vio_per_store)])
+
+ggplot(top_20_new,aes(x = top_20_new$DBA, y = top_20_new$vio_per_store)) + 
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Name") + ylab("Number of Violations per store") + labs(title = "Top 20 restaurants/franchises with the most violations per store")
+
+```
+
+- When the violations are normalized by the number of stores for each franchise as well, we see that individual restaurants now have very high number of violations with La Vie En Szechuan Restaurant topping the list for the most number of violations per store.
+
+```{r}
+vio_per_boro <- vio_sub %>% group_by(BORO) %>%
+  summarize(Freq = n(),num_stores = n_distinct(CAMIS)) %>%
+  ungroup()
+
+vio_per_boro <-as.data.frame(vio_per_boro)
+vio_per_boro <- na.omit(vio_per_boro)
+vio_per_boro <- vio_per_boro[vio_per_boro$BORO != '0',]
+vio_per_boro$vio_per_store <- vio_per_boro$Freq / vio_per_boro$num_stores
+head(vio_per_boro)
+```
+
+- Upon doing a borough analysis of the average number of violations per store for each borough, we do not see any trends, with stores in Manhattan, Queens, Bronx and Brooklyn roughly having the same number of violations per store, and Staten Island having a slightly lower number of violations per store.
+
+```{r}
+
+vio_per_zip <- vio_sub %>% group_by(ZIPCODE) %>%
+  summarize(Freq = n(),num_stores = n_distinct(CAMIS)) %>%
+  ungroup()
+
+vio_per_zip <-as.data.frame(vio_per_zip)
+vio_per_zip <- na.omit(vio_per_zip)
+vio_per_zip <- vio_per_zip[vio_per_zip$ZIPCODE != '',]
+vio_per_zip$vio_per_store <- vio_per_zip$Freq / vio_per_zip$num_stores
+
+
+ord_zip <- vio_per_zip[order(- vio_per_zip$vio_per_store),]
+top_20_zip <- ord_zip[1:20,]
+top_20_zip$ZIPCODE <- factor(top_20_zip$ZIPCODE, levels = top_20_zip$ZIPCODE[order(top_20_zip$vio_per_store)])
+
+ggplot(top_20_zip,aes(x = top_20_zip$ZIPCODE, y = top_20_zip$vio_per_store)) + 
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Zipcode") + ylab("Violations Per Store") + labs(title = "Top 20 Zipcodes with the most violations")
+
+zip_table <- table(vio_per_zip$ZIPCODE, vio_per_zip$vio_per_store)
+
+vio_per_zip$prop_per_store <- vio_per_zip$vio_per_store/sum(vio_per_zip$vio_per_store)
+
+expected <- replicate(nrow(vio_per_zip), 1/nrow(vio_per_zip))
+vio_per_zip$exp_prop_per_store <- expected
+res <- chisq.test(vio_per_zip$prop_per_store)
+
+data(zipcode)
+temp <- merge(vio_per_zip,zipcode,by.x='ZIPCODE',by.y='zip')
+
+register_google(key = 'AIzaSyAKu1l6cbDIDmO1ped5B-YUOrP2JywReg8')
+
+map<- get_map(location = 'new york, new york',zoom=10,maptype = 'satellite',source = 'google',color = 'color')
+
+ggmap(map) +
+  geom_point(aes(x=longitude,y=latitude
+                 ,color = vio_per_store)
+                ,data=temp
+                ,na.rm = T
+                ,size = 2.4) +
+  scale_color_gradient(low="coral", high="blue") +
+  xlab("lon") + ylab("lat") + labs(title = "Violations per zipcode in New York",color='Violations Per Store')
+```
+
+- On analyzing the average number of violations per store for each zipcode and plotting it on the map of New York, there aren't many visible trends to be made. However, one inference that does seem to show up is that the average violations per store corresponding to the zipcodes around the Midtown area of Manhattan seem to have lower average violations per store (patch with lighter pink dots around Midtown Manhattan), when compared to the rest of the data. This also may be the case with Downtown Manhattan, although it isn't as clear as with Midtown Manhattan.
+
+```{r}
+yelp_new <- read.csv("tbl_yelp.csv")
+
+rest_vios_CAMIS <- vio_sub %>% dplyr::group_by(CAMIS) %>%
+  dplyr::summarize(Freq = dplyr::n()) %>%
+  dplyr::ungroup()
+
+rest_vios_CAMIS <- as.data.frame(na.omit(rest_vios_CAMIS))
+
+merged_vio <- merge(x=rest_vios_CAMIS,y=yelp_new,by="CAMIS")
+
+
+ggplot(merged_vio) + 
+  geom_point(aes(x=review_count,y=Freq)
+                ,na.rm = T, alpha = 0.3) +
+  xlab("Number of Reviews") + ylab("Number of Violations") + labs(title = "Plot of number of violations vs number of reviews for each restaurant")
+
+
+cor(merged_vio$review_count,merged_vio$Freq, use = "complete.obs")
+```
+
+- A plot of the average violations per store vs the number of times each store has been reviewed on Yelp shows that there is no correlation between the number of reviews and the number of violations of the store, although there is a very small positive correlation between the two. Thus, the popularity of the store does not impact the number of violations it has received.
+
+```{r}
+merged_vio_1 <- na.omit(merged_vio)
+
+ggplot(merged_vio_1, aes( y = Freq)) +
+  geom_boxplot() +
+  xlab("Price Category") +
+  ylab("Violations per store") +
+  facet_grid(~price) +
+  labs(title = "Boxplot of number of violations per restaurant for each price category")
+  
+```
+
+Finally, an analysis of the boxplots of the average violations per store for each price category (1-4) seems to yield an interesting trend. Although the quantiles and the median number of violations per store are roughly the same for each price category, the number of outliers shows a very clear trend. The lower price categories have significantly more outliers than the higher price categories, with the highest price category 4 having only the single outlier. This shows that the chances of a lower priced restaurant having a high number of violations is more than that of a higher priced restaurant, who presumably have higher standards to maintain. 

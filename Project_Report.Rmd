@@ -1,0 +1,1023 @@
+---
+title: "Restaurant Inspections - EDAV Fall 2019"
+author: "Group 33"
+date: "December 12, 2019"
+editor_options: 
+  chunk_output_type: console
+output: 
+  html_document:
+    
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Team:
+
+* Sachit Kumar [sk4661]  
+
+* Karan Rao [ksr2136]  
+
+* Sanjeev Tewani [st3186]  
+
+* Siddhanth Vinay [sv2609]  
+
+GitHub: https://github.com/st3186/edav_final
+
+## 1. Introduction
+
+We've all heard just how dirty restaurant kitchens can get, but we continue to go. So do we actually care? Should we? As full-time (or working part-time!) students, we don't always have the time to cook, much less fall ill. Thus, we decided this was an important problem. And it is: [Outbreak Alert! 2014](https://cspinet.org/resource/outbreak-alert-2014) analyzed ten years of foodborne illness data and found that restaurants were responsible for twice as many outbreaks of disease as private homes. [The Centers for Disease Control and Prevention estimate](https://www.cdc.gov/foodborneburden/) that each year 48 million people get sick, 128,000 are hospitalized, and 3,000 die of food-borne diseases in total. And by the previous statistic, a significant fraction of these is from restaurants. The pathogens include salmonella, E. coli, listeria, campylobacter, and vibrio cholerae.
+
+Another reason we chose this: we found we could integrate it with Yelp using their API, as outlined in [this article from Enigma](https://www.enigma.com/blog/mapping-nyc-restaurant-inspections-from-internal-hack-week-project-to-production-ready-app). This would get us a few extra parameters like the restaurant's rating, number of reviews, and price range.
+
+
+Here are some of the questions we decided to explore:
+
+1. How do health violations correspond to Yelp review counts and average ratings? Are busier restaurants dirtier?
+
+2. Is the density of health violations clustered by location?
+
+3. What types of restaurants (both in terms of cuisine and categories like coffee shop, deli) are more likely to have violations, not have violations, or be shut down?
+
+4. Are grade-A restaurants truly clean or just clean enough to avoid a B?
+
+5. How do health violations correspond to Yelp price ranges (`$` to `$$$$`)?
+
+6. How many violations do restaurants in some especially dirty (or clean) neighborhoods have? How do they compare to the average?
+
+7. "Most buffets are a breeding ground for bacteria for the simple reason that all that food sits at uneven and inconsistent temperature. A buffet is always almost full of leftover ingredients, food made from starch or food that's heavy in fat." - Pragati Shukla, [Kitchen Confidential: 10 Dirty Secrets Restaurants Don't Want You to Know](https://food.ndtv.com/food-drinks/10-dirty-secrets-restaurants-dont-want-you-to-know-748033). Does this affect the number of violations in buffet restaurants? 
+
+8. How do restaurants perform on re-inspections vs the initial ones? Is there always an improvement?
+
+## 2. Data sources
+
+Our first data source was [DOHMH New York City Restaurant Inspection Results](https://data.cityofnewyork.us/Health/DOHMH-New-York-City-Restaurant-Inspection-Results/43nn-pn8j/data) from the NYC Open Data website. The NYC Health Department is responsible for inpecting restaurants and collecting this data every year. From the description:
+
+"The dataset contains every sustained or not yet adjudicated violation citation from every full or special program inspection conducted up to three years prior to the most recent inspection for restaurants and college cafeterias in an active status on the RECORD DATE (date of the data pull)."
+
+Our second source was the [Yelp dataset](https://www.yelp.com/dataset). As it was a large dataset that wasn't focused on New York City, we decided to use the Yelp Fusion API instead to gather data. Another obstacle was that the Yelp and inspection datasets didn't have common identifiers for restaurants, and sometimes the names weren't an exact match either, so we had to ping the [business match API](https://www.yelp.com/developers/documentation/v3/business_match) with the name and location of the restaurant (could be address or latitude and longitude) to find the closest match. We also had to ping the [business details API](https://www.yelp.com/developers/documentation/v3/business) separately to get details like the price range, average rating, and review count. 
+
+This meant 2 pings to the API per row, and since each API key had a limit of 5000 calls per day, we could cover 2500 rows per person every day. There were over 27,000 restaurants in the dataset, so it took us several days to gather extra Yelp particulars for the inspected restaurants. The API returned business details in a JSON, and we added the inspection dataset's identifier to each one so we could link the two.
+
+The parameters returned by the business details API can be found [here](https://www.yelp.com/developers/documentation/v3/business). The ones of interest to this project are `price` (`$` to `$$$$`), `review_count` and `rating`.
+
+There are no major issues with the Yelp dataset or Fusion API. However, some problems that people have run into (and answers to various questions) can be found [here](https://github.com/Yelp/yelp-fusion/issues) on the GitHub issues page. Yelp Fusion also provides [FAQs](https://www.yelp.com/developers/faq) on the main site.
+
+The main Inspections dataset contains 396,415 rows, where each row records a violation. Restaurants with multiple violations have a row for each one. There are 26 columns which include CAMIS (a business ID), DBA (Doing Business As, or the restaurant's name), Borough, Zip Code, Cuisine Description, Violation Description, Critical Flag, Score, Inspection Type, Latitude, and Longitude. The higher the score, the worse it is.
+
+From the website: "Because this dataset is compiled from several large administrative data systems, it contains some illogical values that could be a result of data entry or transfer errors. Data may also be missing."
+
+## 3. Data Transformation
+
+We ran our script that included multiple API calls separately on different slices of the data. The script dumped the response JSONs into a specified document, and we merged all of our documents to get the Yelp-side data. The `jsonlite` library's function `jsonlite::fromJSON(json_file)` reads JSON files into an R dataframe. The function `from_json()` from the `jsonify` package can also be used.
+
+To read the Inspections dataset, we used the function `read_csv()` from the `readr` library because it is much faster than the default `read.csv()` for large CSV files (ours was 169 MB).
+
+There were large numbers of both cuisines and violations, many of which could be easily grouped together. First, for cuisines, a bar plot for the number of violations per cuisine was plotted. This showed us which cuisines would feature more in our analysis, and we decided to leave the big ones alone (e.g. `Chinese` was not grouped under `Asian`) and group together those with fewer counts (`Indonesian` and `Filipino` were). Some were harder to categorize, so the most appropriate label was chosen. For example, `Egyptian` could feature under `Middle Eastern`, `African`, and even `Mediterranean`, but we chose the first one. Also, even though Portugal does not border the Mediterranean Sea, it is considered culturally Med. This reduced the number of cuisine categories from 84 to 53. Cuisines include both countries and the type of restaurant (e.g. coffee shop).
+
+Violations were also grouped into categories such as `Unsafe temperature control`, `Chemical/waste contaminant`, and `Unsafe food storage/origin`. This reduced the number of categories from 92 to 12.
+
+As there were almost 400,000 rows, we decided to use only the most recent inspection results for each restaurant (in most cases). We wrote a script `extract_latest_inspection.R` that performed this selection.
+
+## 4. Missing values
+
+```{r, include=FALSE}
+library(extracat)
+library(tidyverse)
+source("clean_cuisines.R")
+source("clean_violations.R")
+source("extract_latest_inspection.R")
+source("quality_score_by_zip.R")
+
+doh <- readr::read_csv("./edav_final/data/DOHMH_New_York_City_Restaurant_Inspection_Results.csv")
+ylp <- readr::read_csv("./edav_final/tbl_yelp.csv")
+
+mrg <- dplyr::left_join(doh, ylp, by="CAMIS")
+
+final <- extract_latest_inspection(mrg)
+```
+
+```{r, echo=FALSE}
+extracat::visna(final, sort="r")
+```
+
+We can visualize patterns of missing data using extracat; this is essential for our dataset as so much of the data is categorical.  The most common pattern that we see is for no missing data, which comprises just about half of the data; a further quarter of the data is missing all Yelp data. Furthermore, there doesn't appear to be significant correlation between missing Yelp data and missing DOH data; this highlights that it is probably more meaningful to split our merged dataset back into its individual components for this analysis.
+
+```{r, echo=FALSE}
+final[match(colnames(doh), colnames(final))] %>% extracat::visna(sort="b")
+```
+
+Looking at Department of Health Data, we see that the source is mostly complete, with what looks like >95% of rows having all data.  Identifying information (restaurant name and address) is fully complete, and the most commonly missing data is auxiliary location data, like zipcode and census tract.  The only  other data which shows missing data -- and this is very infrequently -- is grade data.  This is reasonable as some restaurants will be "ungraded" if they are given a chance to clean up their act, and others still will show no violation.
+
+```{r}
+raw_ylp_cols <- c("price","rating","review_count","longitude","latitude","opens","closes")
+
+final[match(raw_ylp_cols, colnames(final))] %>% extracat::visna(sort="b")
+```
+
+For the Yelp dataset, we restrict down to non-derived columns.  The most common patterns are no missing data and all missing data -- the latter being an instance where we were unable to recover a matching Yelp restaurant for the DOH's inspection, and which therefore doesn't constitute a "true" pattern of missing data in some sense. Therefore, almost all the true missing data comes in three patterns: no price information, no hours of operations data, and neither price nor hours of operations data.  Perhaps not suprisingly, Yelp is very good at knowing longitude and latitude, presumably for showing users nearby highly rated restaurants.  Since the DOH was (infrequently) missing auxiliary information, it would be interesting to know if we could recover things like zipcode from the Yelp dataset.  Although we don't do this given how small the probability of missing
+zipcode data is, we can quickly verify that in fact no rows in the dataset have both missing latitude and zipcode, so better location data is in fact possible with some minor work.
+
+```{r}
+final[c("ZIPCODE", "Census Tract","Latitude")] %>% extracat::visna(sort="b")
+```
+
+
+## 5. Results
+
+### Selected findings:
+
+
+```{r, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(zipcode)
+library(maptools)
+library(ggmap)
+library(rjson)
+library(jsonlite)
+```
+
+
+```{r, include=FALSE}
+violations <- read.csv("./edav_final/data/DOHMH_New_York_City_Restaurant_Inspection_Results.csv")
+
+actions <- as.factor(violations$ACTION)
+#summary(violations$ACTION)
+
+vio_sub <- violations[violations$ACTION != 'No violations were recorded at the time of this inspection.',]
+vio_sub <- vio_sub[violations$ACTION != 'Establishment re-opened by DOHMH',]
+vio_sub <- vio_sub[vio_sub$ACTION != '',]
+
+
+rest_vios <- vio_sub %>% group_by(DBA) %>%
+  summarize(Freq = n(),num_stores = n_distinct(CAMIS)) %>%
+  ungroup()
+```
+
+```{r}
+rest_vios <- na.omit(rest_vios)
+rest_vios_ord <- rest_vios[order(- rest_vios$Freq),]
+top_20 <- rest_vios_ord[1:20,]
+top_20$DBA <- factor(top_20$DBA, levels = top_20$DBA[order(top_20$Freq)])
+
+ggplot(top_20,aes(x = top_20$DBA, y = top_20$Freq)) + 
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Name") + ylab("Number of Violations") + labs(title = "Top restaurants/franchises by violations")
+```
+
+
+Upon an inspection of the franchises with the most violations, we see that most of the big franchise chains feature quite heavily. This is due to them having a large number of stores across the city, thus making violations more likely. Also, since they are run by franchisees, the company may not be able to directly supervise them. [This article](https://www.qchron.com/editions/central/health-department-shuts-down-dunkin/article_6cc7a18d-013c-564d-9629-f0e55f713e58.html) about Dunkin' mentions that one outlet was shut down for having 40 violation points, while two others had just 5 and 6. We couldn't find a reason why Dunkin' seems dirtier on average than other restaurants (we assumed it was because of how busy it is, but we found no correlation between review count and violations), but this inconsistency in scores between outlets seems to be an issue of franchising.
+
+However, numbers cannot be directly compared here due to the different population sizes.
+
+```{r}
+rest_vios_df <- as.data.frame(rest_vios)
+rest_vios_df <- na.omit(rest_vios_df)
+rest_vios_df$vio_per_store <- rest_vios_df$Freq / rest_vios_df$num_stores
+
+
+
+rest_vios_ord_df <- rest_vios_df[order(- rest_vios_df$vio_per_store),]
+top_20_new <- rest_vios_ord_df[1:20,]
+top_20_new$DBA <- factor(top_20_new$DBA, levels = top_20_new$DBA[order(top_20_new$vio_per_store)])
+
+ggplot(top_20_new,aes(x = top_20_new$DBA, y = top_20_new$vio_per_store)) + 
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Name") + ylab("Number of Violations per store") + labs(title = "By violations per store")
+
+```
+
+When the violations are normalized by the number of stores, we see that individual restaurants now have very high number of violations with La Vie En Szechuan Restaurant topping the list. This may be because large companies, lax though they may be (Dunkin'), are probably more likely to have standards for employees to follow. Even though they may not have direct control over their franchises, it appears that they turn out cleaner than independent stores left to their own devices.
+
+```{r, include=FALSE}
+vio_per_boro <- vio_sub %>% group_by(BORO) %>%
+  summarize(Freq = n(),num_stores = n_distinct(CAMIS)) %>%
+  ungroup()
+```
+```{r}
+vio_per_boro <-as.data.frame(vio_per_boro)
+vio_per_boro <- na.omit(vio_per_boro)
+vio_per_boro <- vio_per_boro[vio_per_boro$BORO != '0',]
+vio_per_boro$vio_per_store <- vio_per_boro$Freq / vio_per_boro$num_stores
+head(vio_per_boro)
+```
+
+After analyzing the average number of violations per store for each borough, we do not see any trends. Stores in Manhattan, Queens, The Bronx, and Brooklyn have roughly the same number of violations per store, and Staten Island has a slightly lower number of violations per store.
+
+```{r, include=FALSE}
+
+vio_per_zip <- vio_sub %>% group_by(ZIPCODE) %>%
+  summarize(Freq = n(),num_stores = n_distinct(CAMIS)) %>%
+  ungroup()
+```
+```{r, include=FALSE}
+vio_per_zip <-as.data.frame(vio_per_zip)
+vio_per_zip <- na.omit(vio_per_zip)
+vio_per_zip <- vio_per_zip[vio_per_zip$ZIPCODE != '',]
+vio_per_zip$vio_per_store <- vio_per_zip$Freq / vio_per_zip$num_stores
+
+
+ord_zip <- vio_per_zip[order(- vio_per_zip$vio_per_store),]
+top_20_zip <- ord_zip[1:20,]
+top_20_zip$ZIPCODE <- factor(top_20_zip$ZIPCODE, levels = top_20_zip$ZIPCODE[order(top_20_zip$vio_per_store)])
+
+ggplot(top_20_zip,aes(x = top_20_zip$ZIPCODE, y = top_20_zip$vio_per_store)) + 
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("Zipcode") + ylab("Violations Per Store") + labs(title = "Top 20 Zipcodes with the most violations")
+```
+
+```{r, include=FALSE}
+zip_table <- table(vio_per_zip$ZIPCODE, vio_per_zip$vio_per_store)
+
+vio_per_zip$prop_per_store <- vio_per_zip$vio_per_store/sum(vio_per_zip$vio_per_store)
+
+expected <- replicate(nrow(vio_per_zip), 1/nrow(vio_per_zip))
+vio_per_zip$exp_prop_per_store <- expected
+res <- chisq.test(vio_per_zip$prop_per_store)
+```
+
+```{r}
+data(zipcode)
+temp <- merge(vio_per_zip,zipcode,by.x='ZIPCODE',by.y='zip')
+
+register_google(key = 'AIzaSyAKu1l6cbDIDmO1ped5B-YUOrP2JywReg8')
+
+map<- get_map(location = 'new york, new york',zoom=10,maptype = 'satellite',source = 'google',color = 'color')
+
+ggmap(map) +
+  geom_point(aes(x=longitude,y=latitude
+                 ,color = vio_per_store)
+                ,data=temp
+                ,na.rm = T
+                ,size = 2.4) +
+  #scale_color_gradient(low="coral", high="blue") +
+  scale_color_viridis_c() +
+  xlab("lon") + ylab("lat") + labs(title = "Violations per zipcode in New York",color='Violations Per Store')
+```
+
+On analyzing the average number of violations per store for each zip code and plotting it on a map of New York City, there aren't many trends that show up. However, one possible inference is that there are fewer violations per store on average around Midtown (patch with lighter pink dots) compared to the rest of the area. This may also be the case with Downtown Manhattan, although it isn't as clear. There is one outlier on the outskirts of Queens - we suspect this is a small zip code with a few especially dirty restaurants that drive up the average score.
+
+```{r}
+yelp_new <- read.csv("./edav_final/tbl_yelp.csv")
+
+rest_vios_CAMIS <- vio_sub %>% dplyr::group_by(CAMIS) %>%
+  dplyr::summarize(Freq = dplyr::n()) %>%
+  dplyr::ungroup()
+
+rest_vios_CAMIS <- as.data.frame(na.omit(rest_vios_CAMIS))
+
+merged_vio <- merge(x=rest_vios_CAMIS,y=yelp_new,by="CAMIS")
+
+
+ggplot(merged_vio) + 
+  geom_point(aes(x=review_count,y=Freq)
+                ,na.rm = T, alpha = 0.3) +
+  xlab("Number of Reviews") + ylab("Number of Violations") + labs(title = "Number of violations vs number of reviews for each restaurant")
+
+
+cor(merged_vio$review_count,merged_vio$Freq, use = "complete.obs")
+```
+
+A plot of the average number of violations per store vs the number of times each store has been reviewed on Yelp shows that there is almost no correlation between them (very slightly positive). Thus, the popularity of the store (or how busy it is) does not impact the number of violations it receives. One limitation here is that very few people leave Yelp reviews for the restaurants they visit, and they are probably more likely to leave a review for a unique, independent restaurant than for a popular chain (which is also likely to be much busier, so the review count might grossly underestimate the actual foot traffic).
+
+```{r}
+merged_vio_1 <- na.omit(merged_vio)
+
+ggplot(merged_vio_1, aes( y = Freq)) +
+  geom_boxplot() +
+  xlab("Price Category") +
+  ylab("Violations per store") +
+  facet_grid(~price) +
+  labs(title = "Number of violations per restaurant for each price category")
+  
+```
+
+Finally, an analysis of the boxplots of the average number of violations per store for each price category (1-4) seems to yield an interesting trend. Although the quantiles and the median number of violations per store are roughly the same for each price category, the number of outliers shows a very clear trend. The lower price categories have significantly more outliers than the higher price categories, with the highest price category 4 having only a single outlier. This shows that the chances of a lower-priced restaurant having a high number of violations are greater than that of a higher-priced restaurant, which presumably has higher standards to maintain. 
+
+```{r, include=FALSE}
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(dplyr)
+
+source("clean_cuisines.R")
+source("clean_violations.R")
+source("missing.R")
+
+rest <- readr::read_csv("edav_final/data/DOHMH_New_York_City_Restaurant_Inspection_Results.csv")
+
+cuisines <- unique(rest$`CUISINE DESCRIPTION`) 
+violations <- unique(rest$`VIOLATION DESCRIPTION`)
+```
+
+```{r}
+#find most common violations
+rest %>% 
+  group_by(`VIOLATION DESCRIPTION`) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n)) %>%
+  print(n=10)
+```
+
+The most common violation appears to be regarding non-food contact surfaces, but this is before grouping similar types of violations together.
+
+```{r, include=FALSE}
+#date column
+rest$`INSPECTION DATE` <- as.Date(rest$`INSPECTION DATE`, "%m/%d/%Y")
+rest <- rest[order(rest$CAMIS, -as.numeric(rest$`INSPECTION DATE`)),]
+
+rest$`CUISINE DESCRIPTION` <- as.factor(rest$`CUISINE DESCRIPTION`) 
+
+#clean cuisines
+rest <- clean_cuisines(rest)
+rest <- clean_violations(rest)
+```
+
+```{r}
+#find most common new violations
+rest %>% 
+  group_by(`VIOLATION_TYPE`) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n)) %>%
+  print(n=10)
+```
+
+It turns out that pests are by far the biggest cause of violations. This comes as no suprise, as New York was found to be the [second-pestiest state](https://www.nbcnewyork.com/news/local/new-york-bed-bugs-pests-social-media-posts/363872/) in the country. It is estimated that there are 2 million rats in the city.
+
+```{r}
+#neighborhood zip codes
+#normalize by number of restaurants in each zip code
+zip_list <- list(
+
+bronx_soundview_dirty = c("10472", "10473"),
+bronx_riverdale_clean = c("10463", "10471"),
+
+man_hamheights_dirty = c("10031", "10032", "10039"),
+man_bpc_clean = c("10280", "10282"),
+man_financial_clean = c("10004", "10005", "10006", "10038"),
+
+staten_mariners_dirty = c("10303"),
+staten_greatkills_clean = c("10306", "10308", "10312"),
+
+queens_ozonepark_dirty = c("11416", "11417"),
+queens_foresthills_clean = c("11375"),
+queens_regopark_clean = c("11374"),
+queens_bayside_clean = c("11360", "11361", "11364"),
+
+brooklyn_cypress_dirty = c("11208"),
+brooklyn_cobblehill_clean = c("11201", "11231")
+
+)
+
+zip_names = names(zip_list)
+zip_frame = data.frame(neighborhood=zip_names)
+zip_frame[, "violations_norm"] <- NA
+
+rest = as.data.frame(rest)
+
+#average violation score per restaurant in these zip codes (most recent)
+rownum = 1
+for(name in zip_names){
+  codes = zip_list[[name]]
+  rest_count = 0
+  total_score = 0
+  for(z in codes){
+    zframe = rest[rest$`ZIPCODE` == z,]
+    zframe = zframe[order(zframe$CAMIS, -as.numeric(zframe$`INSPECTION DATE`)),]
+    zframe = zframe[!is.na(zframe$SCORE),]
+    first_of = zframe[!duplicated(zframe$CAMIS),]
+    rest_count = rest_count + nrow(na.omit(first_of))
+    total_score = total_score + sum(first_of$SCORE, na.rm=TRUE)
+  }
+  zip_frame[rownum, 2] = total_score/rest_count
+  rownum = rownum+1
+}
+
+#average violation per restaurant (all included, most recent score)
+
+rest = rest[order(rest$CAMIS, -as.numeric(rest$`INSPECTION DATE`)),]
+rest = rest[!is.na(rest$SCORE),]
+first_of = rest[!duplicated(rest$CAMIS),]
+rest_count = rest_count + nrow(na.omit(first_of))
+total_score = total_score + sum(first_of$SCORE, na.rm=TRUE)
+
+zip_frame[nrow(zip_frame) + 1,] = list("average", total_score/rest_count)
+
+zip_frame$name = list("Soundview", "Riverdale", "Hamilton Heights", "Battery Park City", 
+                      "Financial District", "Mariners Harbor", "Great Kills", "Ozone Park", 
+                      "Forest Hills", "Rego Park", "Bayside", "Cypress Hills", "Cobble Hill", 
+                      "All areas")
+
+zip_frame$type = list("dirty", "clean", "dirty", "clean", 
+                      "clean", "dirty", "clean", "dirty", 
+                      "clean", "clean", "clean", "dirty", 
+                      "clean", "average")
+
+theme_dotplot <- theme_bw(14) +
+  theme(axis.text.y = element_text(size = rel(.75)),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size = rel(.75)),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(size = 0.5),
+        panel.grid.minor.x = element_blank())
+
+zip_frame <- as.data.frame(lapply(zip_frame, unlist))
+zip_frame$name <- as.factor(zip_frame$name) 
+
+ggplot(zip_frame, 
+       aes(x=violations_norm, y=fct_reorder(name, violations_norm,
+                                    .desc=FALSE), color=type)) + geom_point() + 
+  ggtitle("Normalized average violation scores") + ylab("") + theme_dotplot +scale_color_viridis_d()
+```
+
+A few dirty and clean neighborhoods from all five boroughs were selected manually based on some online research. While this is a very small sample size, it appears to confirm what we suspected: despite a couple of exceptions (which did not stray far from the average), dirtier neighborhoods seem to have restaurants with more violations, and therefore higher inspection scores.
+
+```{r}
+#find most common inspection types - can disregard some
+# rest %>% 
+#   group_by(`INSPECTION TYPE`) %>%
+#   summarise(n = n()) %>%
+#   arrange(desc(n)) %>%
+#   print(n=25)
+
+# 1 Cycle Inspection / Initial Inspection                   230205
+# 2 Cycle Inspection / Re-inspection                         97037
+# 3 Pre-permit (Operational) / Initial Inspection            27350
+# 4 Pre-permit (Operational) / Re-inspection                 12359
+
+inspect = rest[rest$`INSPECTION TYPE` %in% c("Cycle Inspection / Initial Inspection", 
+                                             "Cycle Inspection / Re-inspection",
+                                             "Pre-permit (Operational) / Initial Inspection",
+                                             "Pre-permit (Operational) / Re-inspection"),]
+
+inspect$`INSPECTION TYPE` = as.factor(inspect$`INSPECTION TYPE`)
+
+levels(inspect$`INSPECTION TYPE`)[levels(inspect$`INSPECTION TYPE`)=="Cycle Inspection / Initial Inspection"] <- "Initial Inspection"
+levels(inspect$`INSPECTION TYPE`)[levels(inspect$`INSPECTION TYPE`)=="Pre-permit (Operational) / Initial Inspection"] <- "Initial Inspection"
+levels(inspect$`INSPECTION TYPE`)[levels(inspect$`INSPECTION TYPE`)=="Cycle Inspection / Re-inspection"] <- "Re-inspection"
+levels(inspect$`INSPECTION TYPE`)[levels(inspect$`INSPECTION TYPE`)=="Pre-permit (Operational) / Re-inspection"] <- "Re-inspection"
+
+
+
+ggplot(inspect,aes(SCORE))+
+  geom_histogram(col="black")+
+  facet_wrap(~inspect$`INSPECTION TYPE`)+
+  ggtitle("Distribution of all scores")+
+  labs(x="Score",y="Number of restaurants")
+
+ggplot(inspect,aes(y=SCORE))+
+  geom_boxplot()+
+  facet_grid(~inspect$`INSPECTION TYPE`)+
+  ggtitle("Distribution of all scores")+
+  labs(x="Score",y="Number of restaurants")
+```
+
+What we can tell from here is that re-inspections are less frequent, and that their scores tend to be lower - the re-inspection graph drops off at 75 violation points, while the inspection graph's tail still has some restaurants at close to 90 violation points (a score of 90, not 90 violations). The boxplot of reinspections clearly has smaller outliers and a lower median. But it would be more meaningful to compare the scores of individual restaurants.
+
+```{r}
+
+init = inspect[inspect$`INSPECTION TYPE` == "Initial Inspection",]
+init = init[!is.na(init$SCORE),]
+# print("The mean initial score is:")
+# print(sum(init$SCORE)/length(init$SCORE))
+# print("The median initial score is:")
+# print(median(init$SCORE, na.rm=TRUE))
+
+re = inspect[inspect$`INSPECTION TYPE` == "Re-inspection",]
+re = re[!is.na(re$SCORE),]
+# print("The mean re-score is:")
+# print(sum(re$SCORE)/length(re$SCORE))
+# print("The median re-score is:")
+# print(median(re$SCORE, na.rm=TRUE))
+
+#rename column to rescore in the second one, delete the INSPECTION_TYPE column in both
+#take the most recent inspection score 
+#and the most recent reinspection score for each restaurant
+#merge them with the CAMIS key
+init2 = select(init, CAMIS, `INSPECTION DATE`, SCORE)
+re2 = select(re, CAMIS, `INSPECTION DATE`, SCORE)
+colnames(re2)[colnames(re2)=="SCORE"] <- "RESCORE"
+
+init2 = init2[order(init2$CAMIS, -as.numeric(init2$`INSPECTION DATE`)),]
+init2 = init2[!is.na(init2$SCORE),]
+first_of_init = init2[!duplicated(init2$CAMIS),]
+
+re2 = re2[order(re2$CAMIS, -as.numeric(re2$`INSPECTION DATE`)),]
+re2 = re2[!is.na(re2$RESCORE),]
+first_of_re = re2[!duplicated(re2$CAMIS),]
+
+both <- merge(first_of_init, first_of_re, by="CAMIS")
+
+
+library(parcoords)
+cawls = select(both, SCORE, RESCORE)
+parcoords(cawls, brushMode = "2D-strums", alphaOnBrushed = 0.2, rownames = FALSE, withD3 = TRUE)
+```
+
+```{r, include=FALSE}
+library(GGally)
+library(gridExtra)
+```
+
+```{r}
+ggparcoord(cawls, columns=1:2, scale = "globalminmax", alphaLines = 0.3)
+```
+
+(Including both because the interactive one doesn't allow for a global scale.)
+Surprisingly, there are restaurants that do even worse on re-inspections. The biggest changes are the drops from high inspection scores to lower re-inspection scores. In fact, they seem comparable apart from these outliers. But if we highlight sections of the interactive plot, moving downward on the `SCORE` side, we see that the lines splinter off as they get higher, and are much more concentrated when moving to the same level or lower. Thus, restaurants appear slightly more likely to improve on a re-inspection.
+
+However, the article [No Money in a Dirty Kitchen: The Repercussions of NYC's Restaurant Grading System](https://www.theatlantic.com/health/archive/2012/07/no-money-in-a-dirty-kitchen-the-repercussions-of-nycs-restaurant-grading-system/260183/) suggests that the thoroughness of inspections is inconsistent - the same restaurant could score several points higher or lower after just a month, which could even mean a change in grade.
+
+```{r, include=FALSE}
+#library(ggplot2)
+#library(plyr)
+#library(dplyr)
+#library(tidyr)
+library(plyr)
+library(ggplot2)
+library(dplyr)
+library(forcats)
+#library(tidyr)
+#library(tidyverse)
+source("clean_cuisines.R")
+```
+
+
+
+```{r, include=FALSE}
+library(tidyr)
+```
+
+```{r}
+rest <- readr::read_csv("edav_final/data/DOHMH_New_York_City_Restaurant_Inspection_Results.csv")
+rest$`CUISINE DESCRIPTION` <- as.factor(rest$`CUISINE DESCRIPTION`) 
+
+rest <- clean_cuisines(rest)
+
+rest_copy<-rest[!is.na(rest$ACTION), ]
+
+#Removing restaurants with no violation 
+rest_copy<-rest_copy[!(rest_copy$ACTION=="Establishment re-opened by DOHMH"),]
+rest_copy<-rest_copy[!(rest_copy$ACTION=="No violations were recorded at the time of this inspection."),]
+
+```
+
+
+First, we want to evaluate the violations of the restaurants by cuisine. For this, we use a Cleveland dot plot showing the total number of violations of restaurants of different cuisines.
+
+
+```{r}
+
+rest_copy1<- rest_copy %>% group_by(`CUISINE DESCRIPTION`) %>% dplyr::summarize(Freq = n())
+# create a theme for dot plots, which can be reused
+theme_dotplot <- theme_bw(14) +
+    theme(axis.text.y = element_text(size = rel(.75)),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size = rel(.75)),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(size = 0.5),
+        panel.grid.minor.x = element_blank())
+        
+
+
+# create the plot
+ggplot(rest_copy1, aes(x = Freq, y = reorder(`CUISINE DESCRIPTION`, Freq))) +
+    geom_point(color = "blue") +
+    scale_x_continuous(limits = c(10, 82000),
+        breaks = seq(0, 82500, 10000)) +
+    theme_dotplot +
+    xlab("\nNumber of violations") +
+    ylab("Cuisine\n") +
+    ggtitle("Restaurant Violations by Cuisine")
+```
+
+From the graph above we see that the majority of the violations (~82,000) are from restaurants serving American cuisine - this is a major outlier. We also see that a lot of violations (~41,000) are from Chinese restaurants. But we still don't know which cuisine's restaurants are most likely to have violations, so we normalize by the number of restaurants.
+
+
+
+```{r}
+#Normalizing
+
+# Violations per cuisine
+
+#Divide Violations per cuisine/ #Restaurants per cuisine
+rpc<- rest_copy %>% group_by(`CUISINE DESCRIPTION`,`CAMIS`) %>% dplyr::summarize(Freq = n())
+
+rpc1<- rpc %>% group_by(`CUISINE DESCRIPTION`) %>% dplyr::summarize(Freq = n())
+
+diff <- rest_copy1$Freq/rpc1$Freq
+nv<- as.vector(diff) 
+
+rest_copy2 <- rest_copy1
+rest_copy2$NORMALIZED <- nv
+
+```
+
+
+```{r}
+#library(tidyverse)
+
+#uniq_rest<- rest_copy %>% group_by(CUISINE.DESCRIPTION) %>% summarize(Freq = n())
+# create a theme for dot plots, which can be reused
+theme_dotplot <- theme_bw(14) +
+    theme(axis.text.y = element_text(size = rel(.75)),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size = rel(.75)),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(size = 0.5),
+        panel.grid.minor.x = element_blank())
+        
+
+
+# create the plot
+ggplot(rest_copy2, aes(x = NORMALIZED, y = reorder(`CUISINE DESCRIPTION`, NORMALIZED))) +
+    geom_point(color = "blue") +
+    scale_x_continuous(limits = c(0, 115),
+        breaks = seq(0, 110, 10)) +
+    theme_dotplot +
+    xlab("\nNumber of violations per restaurant") +
+    ylab("Cuisine\n") +
+    ggtitle("Restaurant violations by cuisine - normalized")
+```
+
+
+After normalizing, we see that the restaurants serving American/Chinese cuisine don't have many violations per restaurant but in total have the most violations (previous graph). Bangladeshi restaurants have the most violations. As for types of restaurants, delis come out on top: they usually have issues with refrigeration, pests, and covering food. According to [this article](https://www.nbcnewyork.com/news/local/dirty-grocery-stores-map-i-team-roach-food-violation-health-department/2011176/), about 1 in 28 delis and markets have critical violations.
+
+Donuts did not rank as highly as expected in either graph, which means there are worse offenders out there. As we found earlier, independent restaurants tend to have more violations, and the cuisines from different countries mostly represent these.
+
+```{r}
+library(ggplot2)
+#library(plyr)
+library(dplyr)
+library(tidyr)
+source('clean_cuisines.R')
+```
+
+We now want to analyze the inspections scores of restaurants. Here's a short recap about inspection scores and grades: 
+
+Each restaurant receives an inspection score. Low scores correspond to fewer violations and high scores to more violations. Each restaurant is finally assigned a grade which corresponds to the sum of its inspection scores. A total sum between 0 and 13 earns an A, 14 to 28 earns a B and 28+ earns a C. Many restaurants do not currently have grades because they are usually assigned after multiple inspections, and some have the pending grade P - they have appealed for a review.
+
+```{r}
+rest<-readr::read_csv("./edav_final/data/DOHMH_New_York_City_Restaurant_Inspection_Results.csv")
+
+rest$`CUISINE DESCRIPTION` <- as.factor(rest$`CUISINE DESCRIPTION`) 
+
+rest <-clean_cuisines(rest)
+
+rest_copy<-rest[!is.na(rest$ACTION), ]
+
+rest_copy <- rest_copy[!(rest_copy$BORO=="0"),]
+
+grade_scores <- rest_copy %>% group_by(DBA,SCORE,BORO) %>% dplyr::summarize(Freq = n())
+
+ggplot(data=grade_scores, aes (x=SCORE)) + 
+  stat_density(aes(color=BORO), geom="line",position="identity") + 
+  #geom_density(aes(color=BORO), ,position="identity") +
+  coord_cartesian(xlim=c(0,40)) +
+  labs(title='Density of restaurants by latest score and borough', 
+       x='Score', 
+       y='Restaurant density') + 
+  scale_y_continuous(breaks=seq(0,0.14,0.02),
+                     labels = scales::percent) +
+  scale_colour_brewer(name="Borough", palette='Set1') +
+  theme_bw() +
+  theme(legend.key=element_blank()) +
+  geom_vline(xintercept = c(14,28), colour='grey') +
+  annotate("text", x = c(6,20,35), y = 0.11, label = c('A','B','C'), size=6) +
+  annotate("rect", xmin = 0, xmax = 14, ymin = 0, ymax = 0.13, alpha = .2, fill='#f6c458') +
+  annotate("rect", xmin = 14, xmax = 28, ymin = 0, ymax = 0.13, alpha = .2, fill='#59c6f3') +
+  annotate("rect", xmin = 28, xmax = 60, ymin = 0, ymax = 0.13, alpha = .2, fill='#e06f69')
+```
+
+
+
+From the graph, we see that the score patterns are the same for restaurants from every borough. Though most of the restaurants receive an A grade, most of the total scores come just ahead of threshold (between 10 and 13). Very few restaurants have truly low inspection scores. This does not seem very surprising to us. It seems that most restaurants maintain just enough hygiene not to receive health code violations. Another possible reason for this is that officers might still give a restaurant an A if it's a few points over, but this does not seem very likely - their job is to collect fines, and the peak is around 11-12 and not 13. It is also likely that the inspection process is overly strict, as discussed in [this article](https://www.theatlantic.com/health/archive/2012/07/no-money-in-a-dirty-kitchen-the-repercussions-of-nycs-restaurant-grading-system/260183/), which means all restaurants are bound to rack up a violation or two. General (non-critical) violations receive at least 2 points, critical ones at least 5, and public health hazards at least 7. Also, very few restaurants receive B or C grades.
+
+
+```{r}
+#library(dplyr)
+gradep <- rest %>% 
+  filter(ACTION %in% c("Establishment Closed by DOHMH.  Violations were cited in the following area(s) and those requiring immediate action were addressed."))
+
+gradepcuis <-  gradep %>% group_by(`CUISINE DESCRIPTION`) %>% dplyr::summarize(Freq = n())
+
+testp <- gradep %>% 
+  group_by(`CUISINE DESCRIPTION`,CAMIS) %>% dplyr::summarize(Freq = n())
+
+tesp1 <- testp %>%
+  group_by(`CUISINE DESCRIPTION`) %>% dplyr::summarize(Freq = n())
+
+rest_total <- rest %>% 
+  group_by(`CUISINE DESCRIPTION`,CAMIS) %>% dplyr::summarize(Freq = n())
+
+rest_total1 <- rest_total %>% 
+  group_by(`CUISINE DESCRIPTION`) %>% dplyr::summarize(Freq = n())
+
+merged <- merge(rest_total1, tesp1, by="CUISINE DESCRIPTION")
+
+merged$NORMALIZED <- merged$Freq.y/merged$Freq.x
+
+```
+
+
+
+```{r}
+#gradepcuis_ord <- gradepcuis[order(-gradepcuis$Freq),]
+#top_10 <- gradepcuis_ord[1:5,]
+
+#gradepcuis_ord <- merged[order(- merged$NORMALIZED),]
+
+#top_5_closed <- gradepcuis_ord[1:5,]
+#top_5_closed$`CUISINE DESCRIPTION` <- factor(top_5_closed$`CUISINE DESCRIPTION`, levels = #top_5_closed$`CUISINE DESCRIPTION`[order(top_10$norm)])
+
+# ggplot(top_5_closed,aes(x = reorder(top_5_closed$`CUISINE DESCRIPTION`, top_5_closed$NORMALIZED), y = top_5_closed$NORMALIZED)) + 
+#   geom_bar(stat = "identity",fill = "#5e82db") +
+#   coord_flip() +
+#   ggtitle("Likelihood of closure by cuisine",
+#           subtitle = "Top 5 cuisines likely to be closed") +
+#           theme(plot.title = element_text(face = "bold")) +
+#           theme(plot.subtitle = element_text(face = "bold", color = "grey35")) +
+#           theme(plot.caption = element_text(color = "grey68"))+
+#           xlab("Cuisine") + ylab("Fraction of closed restaurants")
+```
+
+
+
+```{r}
+theme_dotplot <- theme_bw(14) +
+    theme(axis.text.y = element_text(size = rel(.75)),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size = rel(.75)),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(size = 0.5),
+        panel.grid.minor.x = element_blank())
+        
+
+# create the plot
+ggplot(gradepcuis, aes(x = Freq, y = reorder(`CUISINE DESCRIPTION`, Freq))) +
+    geom_point(color = "blue") +
+    scale_x_continuous(limits = c(10, 2600),
+        breaks = seq(0, 2600, 100)) +
+    theme_dotplot +
+    xlab("\nNumber of closures") +
+    ylab("Cuisine\n") +
+    ggtitle("Restaurant closures by cuisine") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+```{r}
+#Normalizing
+
+# Violations per cuisine
+#closed_dat <- data.frame(ID = sample(gradep$`CUISINE DESCRIPTION`,length(gradep$`CUISINE DESCRIPTION`),rep=TRUE))
+#library(plyr)
+
+#closed_vpc <- as.data.frame(lapply(closed_dat, count))
+
+#count number of distinct Restaurants by Cuisine
+#closed_rpc<-ddply(gradep,~`CUISINE DESCRIPTION`,summarise,number_of_distinct_rest=length(unique(CAMIS)))
+#sum(rpc$number_of_distinct_orders)
+
+#Divide Violations per cuisine/ #Restaurants per cuisine
+#closed_diff <- closed_vpc$ID.freq/closed_rpc$number_of_distinct_rest
+#closed_diff <- gradepcuis$Freq/closed_rpc$number_of_distinct_rest
+#nv<- as.vector(closed_diff) 
+
+#closed_vpc1 <- gradepcuis
+#closed_vpc1$norm <- nv
+
+```
+
+```{r}
+#library(tidyverse)
+
+#uniq_rest<- rest_copy %>% group_by(`CUISINE DESCRIPTION`) %>% summarize(Freq = n())
+# create a theme for dot plots, which can be reused
+# theme_dotplot <- theme_bw(14) +
+#     theme(axis.text.y = element_text(size = rel(.75)),
+#         axis.ticks.y = element_blank(),
+#         axis.title.x = element_text(size = rel(.75)),
+#         panel.grid.major.x = element_blank(),
+#         panel.grid.major.y = element_line(size = 0.5),
+#         panel.grid.minor.x = element_blank())
+#         
+# 
+# 
+# # create the plot
+# ggplot(closed_vpc1, aes(x = norm, y = reorder(`CUISINE DESCRIPTION`, norm))) +
+#     geom_point(color = "blue") +
+#     scale_x_continuous(limits = c(0, 25),
+#         breaks = seq(0, 25, 5)) +
+#     theme_dotplot +
+#     xlab("\nNumber of violations per restaurant") +
+#     ylab("Cuisine\n") +
+#     ggtitle("Closures by cuisine - normalized")
+```
+
+
+
+```{r, include=FALSE}
+
+#gradepcuis_ord <- closed_vpc1[order(- closed_vpc1$norm),]
+#top_5_closed <- gradepcuis_ord[1:5,]
+#top_5_closed$`CUISINE DESCRIPTION` <- factor(top_5_closed$`CUISINE DESCRIPTION`, levels = top_5_closed$`CUISINE DESCRIPTION`[order(top_10$norm)])
+# 
+# ggplot(top_5_closed,aes(x = reorder(top_5_closed$`CUISINE DESCRIPTION`, top_5_closed$norm), y = top_5_closed$norm)) + 
+#   geom_bar(stat = "identity",fill = "#5e82db") +
+#   coord_flip() +
+#   ggtitle("What types of Restaurants are more likely to be closed in NYC due to violations?",
+#           subtitle = "Map showing top 5 Restaurants by cuisines liekly to be closed due to violations") +
+#           theme(plot.title = element_text(face = "bold")) +
+#           theme(plot.subtitle = element_text(face = "bold", color = "grey35")) +
+#           theme(plot.caption = element_text(color = "grey68"))+
+#           xlab("Cuisine") + ylab("Number of Violations per restaurant") 
+
+```
+
+```{r}
+#library(tidyverse)
+
+#top_5_closed$`CUISINE DESCRIPTION`, top_5_closed$NORMALIZED
+
+#uniq_rest<- rest_copy %>% group_by(`CUISINE DESCRIPTION`) %>% summarize(Freq = n())
+# create a theme for dot plots, which can be reused
+theme_dotplot <- theme_bw(14) +
+    theme(axis.text.y = element_text(size = rel(.75)),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_text(size = rel(.75)),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(size = 0.5),
+        panel.grid.minor.x = element_blank())
+        
+# move row names to a dataframe column        
+#df <-  swiss %>% tibble::rownames_to_column("Province")
+
+# create the plot
+ggplot(merged, aes(x = merged$NORMALIZED, y = reorder(`CUISINE DESCRIPTION`, merged$NORMALIZED))) +
+    geom_point(color = "blue") +
+    scale_x_continuous(limits = c(0, 1),
+        breaks = seq(0, 1, .2)) +
+    theme_dotplot +
+    xlab("\nLikelihood") +
+    ylab("Cuisine\n") +
+    ggtitle("Likelihood of closure by cuisine")
+```
+
+```{r, include=FALSE}
+
+gradepcuis_ord <- gradepcuis[order(- gradepcuis$Freq),]
+top_10 <- gradepcuis_ord[1:5,]
+top_10$`CUISINE DESCRIPTION` <- factor(top_10$`CUISINE DESCRIPTION`, levels = top_10$`CUISINE DESCRIPTION`[order(top_10$Freq)])
+
+# ggplot(top_10,aes(x = top_10$`CUISINE DESCRIPTION`, y = top_10$Freq)) + 
+#   geom_bar(stat = "identity",fill = "#5e82db") +
+#   coord_flip() +
+#   ggtitle("What types of Restaurants are closed in NYC due to violations?",
+#           subtitle = "Map showing top 5 Restaurants by cuisines closed due to violations") +
+#           theme(plot.title = element_text(face = "bold")) +
+#           theme(plot.subtitle = element_text(face = "bold", color = "grey35")) +
+#           theme(plot.caption = element_text(color = "grey68"))+
+#           xlab("Name") + ylab("Number of Violations") 
+
+```
+
+
+We see that the cuisines with the most closures (absolute) are Chinese, American, Pizza, Latin and Caribbean. The second graph is normalized by the number of restaurants in that cuisine.
+
+Surprisingly, around 40% of Bangladeshi restaurants have been closed: around 18 out of 43. Donuts rank very near the bottom. Bottled beverage sellers have very few violations, as is expected for packaged goods.
+
+To analyze the closure of restaurants across different boroughs, we plot the graph below.
+
+
+```{r}
+gradepcuis <-  gradep %>% group_by(`CUISINE DESCRIPTION`) %>% dplyr::summarize(Freq = n())
+gradepcuis_ord <- gradepcuis[order(-gradepcuis$Freq),]
+top_10 <- gradepcuis_ord[1:5,]
+
+CUIS<-unique(top_10$`CUISINE DESCRIPTION`)
+
+vect <- as.character(CUIS)
+
+gradeptop10 <- gradep %>% 
+  filter(`CUISINE DESCRIPTION` %in% vect) 
+
+gradepT10G<- gradeptop10 %>% group_by(BORO, `CUISINE DESCRIPTION`) %>% dplyr::summarize(Freq = n())
+
+ggplot(gradepT10G, aes(x=BORO, y=Freq, fill = `CUISINE DESCRIPTION`)) +
+  geom_bar(position = "dodge",stat="identity") + xlab("Borough") + ylab("Count")+
+  scale_fill_discrete(name = "Property Type") + 
+  #scale_y_continuous(labels = scales::percent) +
+  ggtitle("What types of Restaurants are closed in NYC by borough?",
+          subtitle = "Map showing Count of Restaurants closed by Borough") +
+          theme(plot.title = element_text(face = "bold")) +
+          theme(plot.subtitle = element_text(face = "bold", color = "grey35")) +
+          theme(plot.caption = element_text(color = "grey68"))+scale_color_gradient(low="#d3cbcb", high="#852eaa")+
+          scale_fill_manual("Cuisine", values=c("#e06f69","#357b8a", "#7db5b8", "#59c6f3", "#f6c458")) +
+          xlab("Borough") + ylab("Count")
+```
+
+Though most of the restaurants closed by cuisine are similar across different boroughs, the closure distribution across Queens seems to be very different.
+In Queens most of the restaurants closed are Chinese, and the number of American restaurants closed is very few compared to other boroughs. If we look at the racial diversity of each borough, Queens has the most Asian residents, being 17.6% Asian by the 2000 census.
+Staten Island does not have many closures.
+
+
+
+
+```{r}
+# gradep <- rest %>% 
+#   filter(ACTION %in% c("Establishment Closed by DOHMH.  Violations were cited in the following area(s) and those requiring immediate action were addressed."))
+# 
+# gradepcuis <-  gradep %>% group_by(`CUISINE DESCRIPTION`) %>% dplyr::summarize(Freq = n())
+# 
+# 
+# gradepcuis_ord <- gradepcuis[order(- gradepcuis$Freq),]
+# top_10 <- gradepcuis_ord[1:5,]
+# top_10$`CUISINE DESCRIPTION` <- factor(top_10$`CUISINE DESCRIPTION`, levels = top_10$`CUISINE DESCRIPTION`[order(top_10$Freq)])
+# 
+# gradepcuis_ord <- merged[order(-merged$NORMALIZED),]
+# top_5_closed <- gradepcuis_ord[1:5,]
+# top_5_closed$`CUISINE DESCRIPTION` <- factor(top_5_closed$`CUISINE DESCRIPTION`, levels = top_5_closed$`CUISINE DESCRIPTION`[order(top_10$norm)])
+# 
+# 
+#
+# CUIS<-unique(top_5_closed$`CUISINE DESCRIPTION`)
+# 
+# vect <- as.character(CUIS)
+# 
+# gradeptop10 <- gradep %>% 
+#   filter(`CUISINE DESCRIPTION` %in% vect) 
+# 
+# gradepT10G<- gradeptop10 %>% group_by(BORO, `CUISINE DESCRIPTION`) %>% dplyr::summarize(Freq = n())
+# 
+# ggplot(gradepT10G, aes(x=BORO, y=Freq, fill = `CUISINE DESCRIPTION`)) +
+#   geom_bar(position = "dodge",stat="identity") + xlab("Borough") + ylab("Count")+
+#   scale_fill_discrete(name = "Property Type") + 
+#   scale_y_continuous(labels = scales::percent) +
+#   ggtitle("What types of Restaurants are likely to be closed in NYC by borough?",
+#           subtitle = "Map showing Count of Restaurants likely to be closed by Borough") +
+#           theme(plot.title = element_text(face = "bold")) +
+#           theme(plot.subtitle = element_text(face = "bold", color = "grey35")) +
+#           theme(plot.caption = element_text(color = "grey68"))+scale_color_gradient(low="#d3cbcb", high="#852eaa")+
+#           scale_fill_manual("Cuisine", values=c("#e06f69","#357b8a", "#7db5b8", "#59c6f3", "#f6c458")) +
+#           xlab("Borough") + ylab("Percentage")
+```
+
+
+
+
+
+
+```{r}
+#library(dplyr)
+# violations <- rest_copy
+# 
+# violations<-violations[!(violations$BORO=="0"),]
+# rest_vios_1 <- violations %>%  
+#   filter(`CUISINE DESCRIPTION` %in% vect)  %>% group_by(BORO,`CUISINE DESCRIPTION`) %>% dplyr::summarise(Freq = n()) %>% mutate(perc=Freq/sum(Freq))
+# 
+# ggplot(rest_vios_1, aes(x = BORO, y = perc*100, fill = `CUISINE DESCRIPTION`)) +
+#     geom_bar(stat="identity") + labs(fill="Cuisine")+
+#   coord_flip() +
+#   ggtitle("What types of Restaurants are present in each borough?",
+#           subtitle = "Map showing Count of Restaurant types present per Borough") +
+#           theme(plot.title = element_text(face = "bold")) +
+#           theme(plot.subtitle = element_text(face = "bold", color = "grey35")) +
+#           theme(plot.caption = element_text(color = "grey68"))+scale_color_gradient(low="#d3cbcb", high="#852eaa")+
+#           scale_fill_manual("Cuisine", values=c("#e06f69","#357b8a", "#7db5b8", "#59c6f3", "#f6c458")) +
+#           xlab("Borough") + ylab("Percentage")
+
+```
+
+
+
+## 6. Interactive component
+
+This is an interactive choropleth of New York City's five boroughs at the zip code level. The zip codes in the first graph (`Score`) are colored by a metric we devised to represent the culinary diversity of the area (using our cleaned `CUISINE DESCRIPTION` column) combined with the Yelp ratings of its restaurants. This is based on the Herfindahl index which is normally used to measure market concentration. Generally, it is the size of firms in relation to the industry and an indicator of the level of competition among them - [Wikipedia](https://en.wikipedia.org/wiki/Herfindahl%E2%80%93Hirschman_Index). The higher the score, the darker the zip code. This means it has high diversity and quality of food - the place to be, you could say.
+
+For more clarity: $\sum_{i} \frac{w_i}{(s_i^2)}$ is our formula. $w_i$ represents the average rating of restaurants for cuisine $i$ in a given zip code. $s_i$ is the fraction of that cuisine in the zip code. For example, if we have 5 Italian restaurants with an average rating of 4 and 15 Greek restaurants with an average rating of 3.5, you would calculate it as $\frac{4}{0.25^2} + \frac{3.5}{0.75^2}$
+The exponent controls how much you reward a zip code for having more diversity. We were worried it was rewarding only diversity and nothing else. It turns out that even if you choose $s_i^0$ (i.e. you just count the number of cuisines in the zip code), you still end up with the same top ~20 ordering of zip codes. Smaller exponents give more weight to the actual ratings, so we can use something like the square root instead for a more balanced metric, in theory (which we ended up doing).
+
+The second option shows the number of violations per zip code, and the third shows the average price range (on a scale of 1-4).
+
+The interactive component has been included in a separate HTML file called interactive_rest.html and is available on the project GitHub at https://github.com/st3186/edav_final.
+
+
+## 7. Conclusion
+
+Some results (and non-results) surprised us: we expected busier restaurants to have more violations, but there was no such trend. And we correctly predicted that restaurants in dirtier neighborhoods were likely to have more violations. Some of our more cynical suspicions were confirmed: restaurants appear to do just enough cleaning to stay afloat.
+
+The project has some limitations. The two datasets could not be merged perfectly with the API, which was based on querying with restaurant names and locations: about 20% of restaurants were left unmatched. With more time for manual cleaning, we might have been able to reduce this number. Some our Yelp rows are missing values for `price`, `opens`, and `closes`, among other variables. 
+
+Some of our analysis (such as that for buffets - not featured here due to small sample size and no real findings, and for clean and dirty neighborhoods) was for questions we found interesting but did not have the data with which to make real conclusions. They were toy examples that we plotted hoping to see overt trends, with small samples constructed manually from online research.
+
+The article [No Money in a Dirty Kitchen: The Repercussions of NYC's Restaurant Grading System](https://www.theatlantic.com/health/archive/2012/07/no-money-in-a-dirty-kitchen-the-repercussions-of-nycs-restaurant-grading-system/260183/) suggests that the grading system, while seemingly successful overall, may not be completely fair. Fines are collected for every violation, and some are trivial: extra condensation from coolers, for example, which pose no threat to customers. The thoroughness of inspections is also inconsistent - the same restaurant could score several points higher or lower after just a month, which could even mean a change in grade.
+
+Future work could include the actual Yelp reviews from the dataset (the API only returns 3 review excerpts): we could check if mentions of good/bad hygiene corroborated the inspection score. We could also answer questions such as whether being open overnight or 24/7 makes violations more likely. Separate analyses for sit-down restaurants, ones that require minimal food prep, and those with completely pre-packaged food would be informative.
+
+
